@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llm-gateway"
+version = "0.1.0"
+description = "Semantic caching + smart routing proxy for OpenAI-compatible APIs"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi==0.115.5",
+    "uvicorn[standard]==0.32.1",
+    "httpx==0.28.0",
+    "sentence-transformers==3.3.1",
+    "numpy==1.26.4",
+    "pyyaml==6.0.2",
+    "python-dotenv==1.0.1",
+    "rich==13.9.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.3",
+    "pytest-asyncio==0.24.0",
+    "httpx==0.28.0",
+    "ruff==0.8.1",
+    "mypy==1.13.0",
+]
+
+[project.scripts]
+llm-gateway = "llm_gateway.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_gateway"]
