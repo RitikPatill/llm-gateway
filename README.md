@@ -8,7 +8,7 @@ Every team hitting LLM APIs burns money on duplicate prompts and over-powered mo
 
 ## Architecture
 
-Target pipeline (steps 1–4 are roadmap items; step 5 is live):
+Target pipeline (steps 1–2 and 5 are live; steps 3–4 are roadmap):
 
 ```
 ┌──────────┐    POST /v1/chat/completions
@@ -18,12 +18,12 @@ Target pipeline (steps 1–4 are roadmap items; step 5 is live):
                                    │  LLM Gateway   │
                                    │  (FastAPI)     │
                                    │                │
-                                   │ 1. Embed query │  (M3)
+                                   │ 1. Embed query │  ✅ live (M3)
                                    │ 2. Cache hit?  │──► return cached response
-                                   │    (SQLite)    │
+                                   │    (SQLite)    │  ✅ live (M3)
                                    │ 3. Score cmplx │  (M4)
                                    │ 4. Route model │  (M4)
-                                   │ 5. Forward SSE │  ✅ live
+                                   │ 5. Forward SSE │  ✅ live (M2)
                                    └───────┬────────┘
                                            │
                           ┌────────────────▼─────────────────┐
@@ -31,7 +31,7 @@ Target pipeline (steps 1–4 are roadmap items; step 5 is live):
                           └──────────────────────────────────┘
 ```
 
-Currently the gateway forwards every request directly to the upstream (step 5). Caching and routing will be layered in front without changing the client-facing API.
+Steps 1–2 (embed + cache lookup) are now live. On a cache hit the upstream is never called; on a miss the response is stored and future similar requests are served in <10 ms.
 
 ## Features
 
@@ -55,9 +55,18 @@ Checked items are implemented and working; unchecked items are on the roadmap.
 - [x] Structured stdout log line per request: timestamp, upstream URL, status, latency, stream flag
 - [x] Integration tests covering non-streaming, streaming, missing API key, and upstream error passthrough
 
+**M3 — Semantic cache**
+
+- [x] `sentence-transformers/all-MiniLM-L6-v2` embeddings via singleton `embedder.py`
+- [x] SQLite-backed cache (`cache.py`): `init_cache`, `get_cached`, `put_cached`
+- [x] Cosine similarity lookup; configurable threshold (default `0.92`)
+- [x] TTL eviction on startup (default 24 h)
+- [x] Non-streaming path: cache hit returns stored response without upstream call
+- [x] Streaming path: bypasses cache, passed through unchanged
+- [x] Unit tests (`tests/test_cache.py`) + integration test for cache-hit behaviour
+
 **Roadmap**
 
-- [ ] Semantic cache (cosine-sim, SQLite)
 - [ ] Complexity-based model routing
 - [ ] Rich terminal dashboard
 - [ ] Docker Compose (gateway + Ollama)
@@ -93,6 +102,19 @@ Point any OpenAI client at `http://localhost:8000` by setting:
 export OPENAI_BASE_URL=http://localhost:8000/v1
 ```
 
+## Configuration
+
+All settings are read from environment variables (copy `.env.example` to `.env`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UPSTREAM_BASE_URL` | `https://api.openai.com/v1` | Upstream OpenAI-compatible API |
+| `UPSTREAM_API_KEY` | — | API key forwarded to the upstream |
+| `SIMILARITY_THRESHOLD` | `0.92` | Cosine similarity cutoff for cache hits (0.0–1.0) |
+| `CACHE_DB_PATH` | `cache.db` | Path to the SQLite cache file |
+| `CACHE_TTL_SECONDS` | `86400` | Cache entry lifetime in seconds (default 24 h) |
+| `LOG_LEVEL` | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+
 ## Development
 
 ```bash
@@ -112,7 +134,7 @@ mypy src/
 |---|------|--------|
 | M1 | Scaffold + README | ✅ |
 | M2 | Proxy core | ✅ |
-| M3 | Semantic cache | 🔲 |
+| M3 | Semantic cache | ✅ |
 | M4 | Complexity routing | 🔲 |
 | M5 | Rich dashboard | 🔲 |
 | M6 | Docker Compose | 🔲 |
