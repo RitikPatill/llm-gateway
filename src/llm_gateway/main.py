@@ -1,3 +1,5 @@
+import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -8,10 +10,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from llm_gateway.cache import get_cached, init_cache, put_cached
-from llm_gateway.config import get_settings
+from llm_gateway.config import get_settings, load_routes_config
 from llm_gateway.embedder import embed
+from llm_gateway.router import resolve_model, score_complexity
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 _HOP_BY_HOP = {"transfer-encoding", "connection", "keep-alive", "te", "trailers", "upgrade", "host"}
 
@@ -23,6 +28,8 @@ async def lifespan(app: FastAPI):
     init_cache(settings.cache_db_path, settings.cache_ttl_seconds)
     # Warm up embedder so the ~2 s model load happens before the first request
     embed("")
+    # Load routing config (empty dict → routing disabled gracefully)
+    app.state.routes_config = load_routes_config(settings.routes_config_path)
     app.state.http_client = httpx.AsyncClient(timeout=120.0)
     yield
     await app.state.http_client.aclose()
@@ -61,6 +68,15 @@ async def chat_completions(request: Request):
     start = time.monotonic()
 
     if stream:
+        # Apply routing before forwarding to upstream
+        if request.app.state.routes_config:
+            messages = json_body.get("messages", [])
+            score = score_complexity(messages)
+            resolved = resolve_model(messages, request.app.state.routes_config)
+            logger.info("router: score=%d model=%s", score, resolved)
+            json_body["model"] = resolved
+            body = json.dumps(json_body).encode()
+
         async def _stream_generator():
             async with client.stream(
                 "POST",
@@ -98,6 +114,15 @@ async def chat_completions(request: Request):
                 f" | latency={latency:.3f}s | stream=False"
             )
             return JSONResponse(content=cached, status_code=200)
+
+        # Cache miss — apply routing before forwarding to upstream
+        if request.app.state.routes_config:
+            messages = json_body.get("messages", [])
+            score = score_complexity(messages)
+            resolved = resolve_model(messages, request.app.state.routes_config)
+            logger.info("router: score=%d model=%s", score, resolved)
+            json_body["model"] = resolved
+            body = json.dumps(json_body).encode()
 
         resp = await client.post(
             upstream_url,

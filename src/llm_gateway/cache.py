@@ -53,7 +53,10 @@ def get_cached(
 ) -> dict | None:
     """Return the best-matching cached response dict, or None on miss."""
     with sqlite3.connect(db_path, check_same_thread=False) as conn:
-        rows = conn.execute("SELECT embedding, response FROM cache").fetchall()
+        try:
+            rows = conn.execute("SELECT embedding, response FROM cache").fetchall()
+        except sqlite3.OperationalError:
+            return None
 
     if not rows:
         return None
@@ -80,6 +83,7 @@ def put_cached(
     """Insert a new (embedding, response, timestamp) row."""
     blob = _serialize(embedding.astype(np.float32))
     with sqlite3.connect(db_path, check_same_thread=False) as conn:
+        conn.execute(_CREATE_TABLE)  # no-op if already exists
         conn.execute(
             "INSERT INTO cache (embedding, response, created_at) VALUES (?, ?, ?)",
             (blob, json.dumps(response), time.time()),
