@@ -8,6 +8,19 @@ from fastapi.testclient import TestClient
 
 from llm_gateway.main import app
 
+SAMPLE_ROUTES_CONFIG = {
+    "tiers": {
+        "fast": {"model": "gpt-3.5-turbo", "description": "Simple queries"},
+        "balanced": {"model": "gpt-4o-mini", "description": "Medium complexity"},
+        "powerful": {"model": "gpt-4o", "description": "Reasoning, code, long context"},
+    },
+    "routing": {
+        "fast_threshold": 30,
+        "balanced_threshold": 70,
+        "default_tier": "balanced",
+    },
+}
+
 UPSTREAM = "https://api.openai.com/v1"
 COMPLETIONS_URL = f"{UPSTREAM}/chat/completions"
 
@@ -92,9 +105,10 @@ async def test_missing_upstream_key_still_forwards(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_upstream_error_passthrough(monkeypatch):
+async def test_upstream_error_passthrough(monkeypatch, tmp_path):
     monkeypatch.setenv("UPSTREAM_BASE_URL", UPSTREAM)
     monkeypatch.setenv("UPSTREAM_API_KEY", "test-key")
+    monkeypatch.setenv("CACHE_DB_PATH", str(tmp_path / "err.db"))
 
     error_body = {"error": {"message": "Internal server error"}}
 
@@ -151,3 +165,47 @@ async def test_cache_hit_skips_upstream(monkeypatch, tmp_path):
     assert resp2.json()["id"] == FAKE_RESPONSE["id"]
     # Upstream should have been called exactly once
     assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_router_downgrades_model(monkeypatch, tmp_path):
+    """Simple prompt with model=gpt-4o is silently downgraded to gpt-3.5-turbo."""
+    monkeypatch.setenv("UPSTREAM_BASE_URL", UPSTREAM)
+    monkeypatch.setenv("UPSTREAM_API_KEY", "test-key")
+    # Fresh DB so no pre-existing embeddings pollute cache similarity checks
+    monkeypatch.setenv("CACHE_DB_PATH", str(tmp_path / "router.db"))
+
+    # Patch embed to return a fixed vector so the cache always misses
+    fixed_vector = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    monkeypatch.setattr("llm_gateway.main.embed", lambda text: fixed_vector)
+    # Use a high similarity threshold so the fixed vector won't match itself
+    monkeypatch.setenv("SIMILARITY_THRESHOLD", "0.9999")
+
+    captured: dict = {}
+
+    def capture_request(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json=FAKE_RESPONSE)
+
+    simple_body = json.dumps({
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+    }).encode()
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(COMPLETIONS_URL).mock(side_effect=capture_request)
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Inject the sample routes config so routing is active
+            app.state.routes_config = SAMPLE_ROUTES_CONFIG
+            resp = await ac.post(
+                "/v1/chat/completions",
+                content=simple_body,
+                headers={"content-type": "application/json"},
+            )
+
+    assert resp.status_code == 200
+    # "hi" is a 1-word prompt → score ≤ 30 → fast tier → gpt-3.5-turbo
+    assert captured.get("model") == "gpt-3.5-turbo"

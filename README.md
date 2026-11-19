@@ -21,8 +21,8 @@ Target pipeline (steps 1–2 and 5 are live; steps 3–4 are roadmap):
                                    │ 1. Embed query │  ✅ live (M3)
                                    │ 2. Cache hit?  │──► return cached response
                                    │    (SQLite)    │  ✅ live (M3)
-                                   │ 3. Score cmplx │  (M4)
-                                   │ 4. Route model │  (M4)
+                                   │ 3. Score cmplx │  ✅ live (M4)
+                                   │ 4. Route model │  ✅ live (M4)
                                    │ 5. Forward SSE │  ✅ live (M2)
                                    └───────┬────────┘
                                            │
@@ -31,7 +31,7 @@ Target pipeline (steps 1–2 and 5 are live; steps 3–4 are roadmap):
                           └──────────────────────────────────┘
 ```
 
-Steps 1–2 (embed + cache lookup) are now live. On a cache hit the upstream is never called; on a miss the response is stored and future similar requests are served in <10 ms.
+Steps 1–4 are now live. On a cache hit the upstream is never called; on a miss the complexity scorer picks a tier (`fast` / `balanced` / `powerful`) and the resolved model ID is injected into the forwarded request transparently.
 
 ## Features
 
@@ -65,9 +65,16 @@ Checked items are implemented and working; unchecked items are on the roadmap.
 - [x] Streaming path: bypasses cache, passed through unchanged
 - [x] Unit tests (`tests/test_cache.py`) + integration test for cache-hit behaviour
 
+**M4 — Smart router**
+
+- [x] `config/routes.yaml` — YAML routing table: tier names → real model IDs
+- [x] `router.py` — `score_complexity()` heuristic (token count + keyword scan) and `resolve_model()`
+- [x] Routing injected transparently on cache miss (non-streaming and streaming paths)
+- [x] Graceful degradation: missing/malformed `routes.yaml` → original client model passes through
+- [x] Unit tests (`tests/test_router.py`) + integration test for model downgrade
+
 **Roadmap**
 
-- [ ] Complexity-based model routing
 - [ ] Rich terminal dashboard
 - [ ] Docker Compose (gateway + Ollama)
 
@@ -113,6 +120,7 @@ All settings are read from environment variables (copy `.env.example` to `.env`)
 | `SIMILARITY_THRESHOLD` | `0.92` | Cosine similarity cutoff for cache hits (0.0–1.0) |
 | `CACHE_DB_PATH` | `cache.db` | Path to the SQLite cache file |
 | `CACHE_TTL_SECONDS` | `86400` | Cache entry lifetime in seconds (default 24 h) |
+| `ROUTES_CONFIG_PATH` | `config/routes.yaml` | Path to the YAML routing table |
 | `LOG_LEVEL` | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 ## Development
@@ -135,7 +143,7 @@ mypy src/
 | M1 | Scaffold + README | ✅ |
 | M2 | Proxy core | ✅ |
 | M3 | Semantic cache | ✅ |
-| M4 | Complexity routing | 🔲 |
+| M4 | Complexity routing | ✅ |
 | M5 | Rich dashboard | 🔲 |
 | M6 | Docker Compose | 🔲 |
 

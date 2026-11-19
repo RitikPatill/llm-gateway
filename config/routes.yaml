@@ -1,0 +1,17 @@
+tiers:
+  fast:
+    model: "gpt-3.5-turbo"
+    description: "Simple queries — low token count, no complex keywords"
+  balanced:
+    model: "gpt-4o-mini"
+    description: "Medium complexity"
+  powerful:
+    model: "gpt-4o"
+    description: "Reasoning, code, long context"
+
+routing:
+  # thresholds are INCLUSIVE upper bounds for complexity score
+  fast_threshold: 30      # score <= 30 → fast
+  balanced_threshold: 70  # score <= 70 → balanced
+  # score > 70 → powerful
+  default_tier: "balanced"
