@@ -8,6 +8,8 @@ Every team hitting LLM APIs burns money on duplicate prompts and over-powered mo
 
 ## Architecture
 
+Target pipeline (steps 1–4 are roadmap items; step 5 is live):
+
 ```
 ┌──────────┐    POST /v1/chat/completions
 │  Client  │──────────────────────────────►┐
@@ -16,12 +18,12 @@ Every team hitting LLM APIs burns money on duplicate prompts and over-powered mo
                                    │  LLM Gateway   │
                                    │  (FastAPI)     │
                                    │                │
-                                   │ 1. Embed query │
+                                   │ 1. Embed query │  (M3)
                                    │ 2. Cache hit?  │──► return cached response
                                    │    (SQLite)    │
-                                   │ 3. Score cmplx │
-                                   │ 4. Route model │
-                                   │ 5. Forward SSE │
+                                   │ 3. Score cmplx │  (M4)
+                                   │ 4. Route model │  (M4)
+                                   │ 5. Forward SSE │  ✅ live
                                    └───────┬────────┘
                                            │
                           ┌────────────────▼─────────────────┐
@@ -29,15 +31,32 @@ Every team hitting LLM APIs burns money on duplicate prompts and over-powered mo
                           └──────────────────────────────────┘
 ```
 
+Currently the gateway forwards every request directly to the upstream (step 5). Caching and routing will be layered in front without changing the client-facing API.
+
 ## Features
 
 Checked items are implemented and working; unchecked items are on the roadmap.
+
+**M1 — Scaffold**
 
 - [x] Python package scaffold (`src/llm_gateway/`) with pinned dependencies (`pyproject.toml`)
 - [x] FastAPI app skeleton with `/healthz` liveness endpoint
 - [x] `.env.example` documenting all configuration keys
 - [x] Dev toolchain wired: pytest, ruff, mypy, hatchling build
-- [ ] Transparent `/v1/chat/completions` proxy
+
+**M2 — Proxy core**
+
+- [x] `config.py` settings module: `UPSTREAM_BASE_URL`, `UPSTREAM_API_KEY`, `LOG_LEVEL` read from environment
+- [x] `POST /v1/chat/completions` forwarded to configurable upstream via `httpx`
+- [x] Streaming (SSE) and non-streaming response modes
+- [x] Hop-by-hop header stripping; `Authorization` injected from `UPSTREAM_API_KEY`
+- [x] Shared `httpx.AsyncClient` via FastAPI lifespan (connection pooling, 120 s timeout)
+- [x] Upstream HTTP status codes and error bodies forwarded verbatim
+- [x] Structured stdout log line per request: timestamp, upstream URL, status, latency, stream flag
+- [x] Integration tests covering non-streaming, streaming, missing API key, and upstream error passthrough
+
+**Roadmap**
+
 - [ ] Semantic cache (cosine-sim, SQLite)
 - [ ] Complexity-based model routing
 - [ ] Rich terminal dashboard
@@ -58,9 +77,14 @@ cp .env.example .env
 # 3. Run
 uvicorn llm_gateway.main:app --reload
 
-# 4. Verify
+# 4. Verify liveness
 curl http://localhost:8000/healthz
 # {"status":"ok"}
+
+# 5. Smoke-test the proxy (requires a valid UPSTREAM_API_KEY in .env)
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}],"stream":false}'
 ```
 
 Point any OpenAI client at `http://localhost:8000` by setting:
@@ -87,7 +111,7 @@ mypy src/
 | # | Name | Status |
 |---|------|--------|
 | M1 | Scaffold + README | ✅ |
-| M2 | Proxy core | 🔲 |
+| M2 | Proxy core | ✅ |
 | M3 | Semantic cache | 🔲 |
 | M4 | Complexity routing | 🔲 |
 | M5 | Rich dashboard | 🔲 |

@@ -24,6 +24,7 @@ dependencies = [
 dev = [
     "pytest==8.3.3",
     "pytest-asyncio==0.24.0",
+    "pytest-respx==0.22.0",
     "httpx==0.28.0",
     "ruff==0.8.1",
     "mypy==1.13.0",
@@ -34,3 +35,6 @@ llm-gateway = "llm_gateway.main:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/llm_gateway"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
