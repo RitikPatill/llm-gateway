@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import numpy as np
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -112,3 +113,41 @@ async def test_upstream_error_passthrough(monkeypatch):
 
     assert resp.status_code == 500
     assert resp.json()["error"]["message"] == "Internal server error"
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_skips_upstream(monkeypatch, tmp_path):
+    """Second identical request is served from cache; upstream is called only once."""
+    monkeypatch.setenv("UPSTREAM_BASE_URL", UPSTREAM)
+    monkeypatch.setenv("UPSTREAM_API_KEY", "test-key")
+    monkeypatch.setenv("CACHE_DB_PATH", str(tmp_path / "test_cache.db"))
+    monkeypatch.setenv("SIMILARITY_THRESHOLD", "0.92")
+
+    fixed_vector = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    monkeypatch.setattr("llm_gateway.main.embed", lambda text: fixed_vector)
+
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post(COMPLETIONS_URL).mock(
+            return_value=httpx.Response(200, json=FAKE_RESPONSE)
+        )
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            # First request — cache miss, upstream called
+            resp1 = await ac.post(
+                "/v1/chat/completions",
+                content=NON_STREAM_BODY,
+                headers={"content-type": "application/json"},
+            )
+            # Second identical request — cache hit, upstream NOT called again
+            resp2 = await ac.post(
+                "/v1/chat/completions",
+                content=NON_STREAM_BODY,
+                headers={"content-type": "application/json"},
+            )
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert resp2.json()["id"] == FAKE_RESPONSE["id"]
+    # Upstream should have been called exactly once
+    assert route.call_count == 1
