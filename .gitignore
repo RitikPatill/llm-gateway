@@ -40,3 +40,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Demo — track the placeholder GIF even though *.gif would normally be ignored
+!demo/demo.gif
