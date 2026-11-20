@@ -24,6 +24,7 @@ Target pipeline (steps 1–2 and 5 are live; steps 3–4 are roadmap):
                                    │ 3. Score cmplx │  ✅ live (M4)
                                    │ 4. Route model │  ✅ live (M4)
                                    │ 5. Forward SSE │  ✅ live (M2)
+                                   │ 6. /metrics    │  ✅ live (M5)
                                    └───────┬────────┘
                                            │
                           ┌────────────────▼─────────────────┐
@@ -73,10 +74,13 @@ Checked items are implemented and working; unchecked items are on the roadmap.
 - [x] Graceful degradation: missing/malformed `routes.yaml` → original client model passes through
 - [x] Unit tests (`tests/test_router.py`) + integration test for model downgrade
 
-**Roadmap**
+**M5 — Rich dashboard + Docker Compose**
 
-- [ ] Rich terminal dashboard
-- [ ] Docker Compose (gateway + Ollama)
+- [x] `metrics.py` — thread-safe in-memory `MetricsStore` (hit rate, p50/p95 latency, tokens saved)
+- [x] `GET /metrics` JSON endpoint polled by the dashboard
+- [x] `dashboard.py` — `python -m llm_gateway.dashboard` renders a live Rich terminal UI (auto-refresh 1 s)
+- [x] `Dockerfile` for the gateway image
+- [x] `docker-compose.yml` wiring gateway + Ollama (health-checked, persistent model volume)
 
 ## Quickstart
 
@@ -97,7 +101,10 @@ uvicorn llm_gateway.main:app --reload
 curl http://localhost:8000/healthz
 # {"status":"ok"}
 
-# 5. Smoke-test the proxy (requires a valid UPSTREAM_API_KEY in .env)
+# 5. Launch the Rich terminal dashboard (separate terminal)
+python -m llm_gateway.dashboard
+
+# 6. Smoke-test the proxy (requires a valid UPSTREAM_API_KEY in .env)
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}],"stream":false}'
@@ -123,6 +130,22 @@ All settings are read from environment variables (copy `.env.example` to `.env`)
 | `ROUTES_CONFIG_PATH` | `config/routes.yaml` | Path to the YAML routing table |
 | `LOG_LEVEL` | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
+## Docker Compose (gateway + Ollama)
+
+```bash
+# Start gateway and Ollama
+docker compose up --build
+
+# Pull a model (first time)
+docker compose exec ollama ollama pull llama3.2
+
+# Dashboard (from host)
+python -m llm_gateway.dashboard --url http://localhost:8000
+```
+
+The gateway will route to `http://ollama:11434/v1` automatically. Downloaded models are
+persisted in the `ollama_data` Docker volume across restarts.
+
 ## Development
 
 ```bash
@@ -144,8 +167,7 @@ mypy src/
 | M2 | Proxy core | ✅ |
 | M3 | Semantic cache | ✅ |
 | M4 | Complexity routing | ✅ |
-| M5 | Rich dashboard | 🔲 |
-| M6 | Docker Compose | 🔲 |
+| M5 | Rich dashboard + Docker Compose | ✅ |
 
 ## License
 

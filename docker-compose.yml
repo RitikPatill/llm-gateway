@@ -1,0 +1,29 @@
+services:
+  gateway:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      UPSTREAM_BASE_URL: http://ollama:11434/v1
+      UPSTREAM_API_KEY: ignored
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  ollama_data:
+
+# To pull a model after starting:
+#   docker compose exec ollama ollama pull llama3.2
