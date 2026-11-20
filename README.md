@@ -1,14 +1,73 @@
-# LLM Gateway
+# LLM Gateway — Semantic Cache & Smart Router
 
-> Semantic caching + smart routing proxy for OpenAI-compatible APIs.
+> A local OpenAI-compatible proxy that semantically caches responses and routes prompts to cheaper models when safe to do so.
 
-## Why
+![LLM Gateway demo](demo/demo.gif)
 
-Every team hitting LLM APIs burns money on duplicate prompts and over-powered models for trivial tasks. LLM Gateway sits transparently in front of any OpenAI-compatible endpoint: it embeds each incoming prompt, finds near-identical cached answers via cosine similarity, and routes low-complexity queries to a cheaper model — all without changing a single line of client code.
+## What it is
+
+LLM Gateway is a lightweight HTTP proxy that sits between your application and any OpenAI-compatible API (OpenAI, Ollama, LiteLLM). It exposes the standard `/v1/chat/completions` endpoint, so any existing client works without modification — just point `OPENAI_BASE_URL` at it.
+
+On every request it embeds the user prompt using a local sentence-transformer model, computes cosine similarity against a SQLite cache, and returns the stored answer if the score clears a configurable threshold. On a cache miss it scores prompt complexity via a token-count + keyword heuristic and routes the request to the cheapest model tier that can handle it. A live Rich terminal dashboard shows hit rate, latency percentiles, and estimated token savings in real time.
+
+## Quickstart
+
+```bash
+git clone https://github.com/RitikPatill/llm-gateway.git
+cd llm-gateway
+
+# Install (Python 3.10+)
+pip install -e ".[dev]"
+
+# Configure upstream
+cp .env.example .env
+# Edit .env — set UPSTREAM_BASE_URL and UPSTREAM_API_KEY
+
+# Run the gateway
+uvicorn llm_gateway.main:app --reload
+
+# Verify it is live
+curl http://localhost:8000/healthz
+# {"status":"ok"}
+
+# Open the terminal dashboard in a second terminal
+python -m llm_gateway.dashboard
+```
+
+```bash
+# OR: run the full stack with Docker Compose (gateway + Ollama, no Python install required)
+docker compose up --build
+
+# Pull a model on first run
+docker compose exec ollama ollama pull llama3.2
+```
+
+## Usage
+
+Point any OpenAI client at the gateway by setting the base URL:
+
+```bash
+export OPENAI_BASE_URL=http://localhost:8000/v1
+export OPENAI_API_KEY=unused   # forwarded to upstream; set a real key in .env
+```
+
+Send a request exactly as you would to the OpenAI API:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "What is the capital of France?"}],
+    "stream": false
+  }'
+```
+
+The first call hits the upstream and stores the response. A second call with a semantically equivalent prompt (e.g. "Capital city of France?") returns the cached answer in under 5 ms without touching the upstream. The model field in the request is transparently rewritten to the tier resolved by the complexity scorer; the caller sees the upstream's response unchanged.
+
+Routing tiers and thresholds are edited in `config/routes.yaml`. Swap OpenAI model IDs for Ollama IDs (e.g. `llama3.2`, `mistral`) to run fully locally at zero cost.
 
 ## Architecture
-
-Target pipeline (steps 1–2 and 5 are live; steps 3–4 are roadmap):
 
 ```
 ┌──────────┐    POST /v1/chat/completions
@@ -18,13 +77,13 @@ Target pipeline (steps 1–2 and 5 are live; steps 3–4 are roadmap):
                                    │  LLM Gateway   │
                                    │  (FastAPI)     │
                                    │                │
-                                   │ 1. Embed query │  ✅ live (M3)
+                                   │ 1. Embed query │
                                    │ 2. Cache hit?  │──► return cached response
-                                   │    (SQLite)    │  ✅ live (M3)
-                                   │ 3. Score cmplx │  ✅ live (M4)
-                                   │ 4. Route model │  ✅ live (M4)
-                                   │ 5. Forward SSE │  ✅ live (M2)
-                                   │ 6. /metrics    │  ✅ live (M5)
+                                   │    (SQLite)    │
+                                   │ 3. Score cmplx │
+                                   │ 4. Route model │
+                                   │ 5. Forward SSE │
+                                   │ 6. /metrics    │
                                    └───────┬────────┘
                                            │
                           ┌────────────────▼─────────────────┐
@@ -32,143 +91,37 @@ Target pipeline (steps 1–2 and 5 are live; steps 3–4 are roadmap):
                           └──────────────────────────────────┘
 ```
 
-Steps 1–4 are now live. On a cache hit the upstream is never called; on a miss the complexity scorer picks a tier (`fast` / `balanced` / `powerful`) and the resolved model ID is injected into the forwarded request transparently.
+On a cache hit the upstream is never called. On a miss the complexity scorer picks a tier (`fast` / `balanced` / `powerful`) and injects the resolved model ID into the forwarded request.
 
-## Features
+## Project structure
 
-Checked items are implemented and working; unchecked items are on the roadmap.
-
-**M1 — Scaffold**
-
-- [x] Python package scaffold (`src/llm_gateway/`) with pinned dependencies (`pyproject.toml`)
-- [x] FastAPI app skeleton with `/healthz` liveness endpoint
-- [x] `.env.example` documenting all configuration keys
-- [x] Dev toolchain wired: pytest, ruff, mypy, hatchling build
-
-**M2 — Proxy core**
-
-- [x] `config.py` settings module: `UPSTREAM_BASE_URL`, `UPSTREAM_API_KEY`, `LOG_LEVEL` read from environment
-- [x] `POST /v1/chat/completions` forwarded to configurable upstream via `httpx`
-- [x] Streaming (SSE) and non-streaming response modes
-- [x] Hop-by-hop header stripping; `Authorization` injected from `UPSTREAM_API_KEY`
-- [x] Shared `httpx.AsyncClient` via FastAPI lifespan (connection pooling, 120 s timeout)
-- [x] Upstream HTTP status codes and error bodies forwarded verbatim
-- [x] Structured stdout log line per request: timestamp, upstream URL, status, latency, stream flag
-- [x] Integration tests covering non-streaming, streaming, missing API key, and upstream error passthrough
-
-**M3 — Semantic cache**
-
-- [x] `sentence-transformers/all-MiniLM-L6-v2` embeddings via singleton `embedder.py`
-- [x] SQLite-backed cache (`cache.py`): `init_cache`, `get_cached`, `put_cached`
-- [x] Cosine similarity lookup; configurable threshold (default `0.92`)
-- [x] TTL eviction on startup (default 24 h)
-- [x] Non-streaming path: cache hit returns stored response without upstream call
-- [x] Streaming path: bypasses cache, passed through unchanged
-- [x] Unit tests (`tests/test_cache.py`) + integration test for cache-hit behaviour
-
-**M4 — Smart router**
-
-- [x] `config/routes.yaml` — YAML routing table: tier names → real model IDs
-- [x] `router.py` — `score_complexity()` heuristic (token count + keyword scan) and `resolve_model()`
-- [x] Routing injected transparently on cache miss (non-streaming and streaming paths)
-- [x] Graceful degradation: missing/malformed `routes.yaml` → original client model passes through
-- [x] Unit tests (`tests/test_router.py`) + integration test for model downgrade
-
-**M5 — Rich dashboard + Docker Compose**
-
-- [x] `metrics.py` — thread-safe in-memory `MetricsStore` (hit rate, p50/p95 latency, tokens saved)
-- [x] `GET /metrics` JSON endpoint polled by the dashboard
-- [x] `dashboard.py` — `python -m llm_gateway.dashboard` renders a live Rich terminal UI (auto-refresh 1 s)
-- [x] `Dockerfile` for the gateway image
-- [x] `docker-compose.yml` wiring gateway + Ollama (health-checked, persistent model volume)
-
-## Quickstart
-
-```bash
-# 1. Clone and install
-git clone https://github.com/yourhandle/llm-gateway.git
-cd llm-gateway
-pip install -e ".[dev]"
-
-# 2. Configure
-cp .env.example .env
-# Edit .env — set UPSTREAM_BASE_URL and UPSTREAM_API_KEY
-
-# 3. Run
-uvicorn llm_gateway.main:app --reload
-
-# 4. Verify liveness
-curl http://localhost:8000/healthz
-# {"status":"ok"}
-
-# 5. Launch the Rich terminal dashboard (separate terminal)
-python -m llm_gateway.dashboard
-
-# 6. Smoke-test the proxy (requires a valid UPSTREAM_API_KEY in .env)
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}],"stream":false}'
+```
+llm-gateway/
+├── src/llm_gateway/   # FastAPI app: main, proxy, cache, embedder, router, metrics, dashboard
+├── config/            # routes.yaml — tier definitions and complexity thresholds
+├── demo/              # terminal GIF (demo.gif) and VHS tape script (demo.tape)
+├── tests/             # pytest unit and integration tests
+├── Dockerfile         # gateway container image
+├── docker-compose.yml # gateway + Ollama stack with health checks and persistent volume
+├── pyproject.toml     # package metadata and pinned dependencies
+└── .env.example       # all configuration keys with descriptions
 ```
 
-Point any OpenAI client at `http://localhost:8000` by setting:
+## Roadmap
 
-```bash
-export OPENAI_BASE_URL=http://localhost:8000/v1
-```
-
-## Configuration
-
-All settings are read from environment variables (copy `.env.example` to `.env`):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `UPSTREAM_BASE_URL` | `https://api.openai.com/v1` | Upstream OpenAI-compatible API |
-| `UPSTREAM_API_KEY` | — | API key forwarded to the upstream |
-| `SIMILARITY_THRESHOLD` | `0.92` | Cosine similarity cutoff for cache hits (0.0–1.0) |
-| `CACHE_DB_PATH` | `cache.db` | Path to the SQLite cache file |
-| `CACHE_TTL_SECONDS` | `86400` | Cache entry lifetime in seconds (default 24 h) |
-| `ROUTES_CONFIG_PATH` | `config/routes.yaml` | Path to the YAML routing table |
-| `LOG_LEVEL` | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-
-## Docker Compose (gateway + Ollama)
-
-```bash
-# Start gateway and Ollama
-docker compose up --build
-
-# Pull a model (first time)
-docker compose exec ollama ollama pull llama3.2
-
-# Dashboard (from host)
-python -m llm_gateway.dashboard --url http://localhost:8000
-```
-
-The gateway will route to `http://ollama:11434/v1` automatically. Downloaded models are
-persisted in the `ollama_data` Docker volume across restarts.
-
-## Development
-
-```bash
-# Run tests
-pytest tests/
-
-# Lint
-ruff check src/ tests/
-
-# Type-check
-mypy src/
-```
-
-## Milestone status
-
-| # | Name | Status |
-|---|------|--------|
-| M1 | Scaffold + README | ✅ |
-| M2 | Proxy core | ✅ |
-| M3 | Semantic cache | ✅ |
-| M4 | Complexity routing | ✅ |
-| M5 | Rich dashboard + Docker Compose | ✅ |
+- [ ] Replace the cosine-only cache with an approximate-nearest-neighbour index (e.g. `hnswlib`) for sub-millisecond lookup at scale
+- [ ] ML-based complexity classifier trained on real prompt/model-tier pairs to replace the keyword heuristic
+- [ ] Per-tenant API keys and usage quotas for multi-user deployments
+- [ ] Persist metrics to SQLite and expose a Prometheus scrape endpoint
+- [ ] Web UI for the dashboard (replace the Rich TUI with a minimal browser-based view)
 
 ## License
 
-[MIT](LICENSE) © 2024 Ritik
+MIT — see LICENSE.
+
+---
+
+Built autonomously by [autodev](https://github.com/RitikPatill/autodev),
+a multi-agent orchestrator I designed. Each commit in this repo was
+authored by me; the implementation work was performed by Sonnet under
+the orchestrator's control. Read the orchestrator's README to see how.
