@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from llm_gateway.cache import get_cached, init_cache, put_cached
 from llm_gateway.config import get_settings, load_routes_config
 from llm_gateway.embedder import embed
+from llm_gateway.metrics import metrics
 from llm_gateway.router import resolve_model, score_complexity
 
 load_dotenv()
@@ -41,6 +42,11 @@ app = FastAPI(title="LLM Gateway", lifespan=lifespan)
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def get_metrics() -> dict:
+    return metrics.snapshot()
 
 
 @app.post("/v1/chat/completions")
@@ -77,21 +83,31 @@ async def chat_completions(request: Request):
             json_body["model"] = resolved
             body = json.dumps(json_body).encode()
 
+        _stream_model = json_body.get("model", "unknown")
+
         async def _stream_generator():
-            async with client.stream(
-                "POST",
-                upstream_url,
-                content=body,
-                headers=forward_headers,
-            ) as resp:
-                latency = time.monotonic() - start
-                ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                print(
-                    f"[{ts}] POST /v1/chat/completions → {upstream_url}"
-                    f" | status={resp.status_code} | latency={latency:.3f}s | stream=True"
+            try:
+                async with client.stream(
+                    "POST",
+                    upstream_url,
+                    content=body,
+                    headers=forward_headers,
+                ) as resp:
+                    latency = time.monotonic() - start
+                    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                    print(
+                        f"[{ts}] POST /v1/chat/completions → {upstream_url}"
+                        f" | status={resp.status_code} | latency={latency:.3f}s | stream=True"
+                    )
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+            finally:
+                latency_ms = (time.monotonic() - start) * 1000
+                metrics.record_request(
+                    latency_ms=latency_ms,
+                    cache_hit=False,
+                    model=_stream_model,
                 )
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
 
         return StreamingResponse(_stream_generator(), media_type="text/event-stream")
 
@@ -109,9 +125,17 @@ async def chat_completions(request: Request):
         if cached is not None:
             ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
             latency = time.monotonic() - start
+            latency_ms = latency * 1000
             print(
                 f"[{ts}] POST /v1/chat/completions → CACHE HIT"
                 f" | latency={latency:.3f}s | stream=False"
+            )
+            tokens_saved = len(str(cached)) // 4
+            metrics.record_request(
+                latency_ms=latency_ms,
+                cache_hit=True,
+                model=json_body.get("model", "unknown"),
+                tokens_saved=tokens_saved,
             )
             return JSONResponse(content=cached, status_code=200)
 
@@ -130,13 +154,20 @@ async def chat_completions(request: Request):
             headers=forward_headers,
         )
         latency = time.monotonic() - start
+        latency_ms = latency * 1000
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         print(
             f"[{ts}] POST /v1/chat/completions → {upstream_url}"
             f" | status={resp.status_code} | latency={latency:.3f}s | stream=False"
         )
 
+        resp_json = resp.json()
         if resp.status_code == 200:
-            put_cached(settings.cache_db_path, emb, resp.json())
+            put_cached(settings.cache_db_path, emb, resp_json)
 
-        return JSONResponse(content=resp.json(), status_code=resp.status_code)
+        metrics.record_request(
+            latency_ms=latency_ms,
+            cache_hit=False,
+            model=json_body.get("model", "unknown"),
+        )
+        return JSONResponse(content=resp_json, status_code=resp.status_code)
